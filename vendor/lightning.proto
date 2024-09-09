@@ -2190,6 +2190,52 @@ message OpenChannelRequest {
     attempted.
     */
     bool scid_alias = 20;
+      /*
+    The base fee charged regardless of the number of milli-satoshis sent.
+    */
+    uint64 base_fee = 21;
+
+    /*
+    The fee rate in ppm (parts per million) that will be charged in
+    proportion of the value of each forwarded HTLC.
+    */
+    uint64 fee_rate = 22;
+
+    /*
+    If use_base_fee is true the open channel announcement will update the
+    channel base fee with the value specified in base_fee. In the case of
+    a base_fee of 0 use_base_fee is needed downstream to distinguish whether
+    to use the default base fee value specified in the config or 0.
+    */
+    bool use_base_fee = 23;
+
+    /*
+    If use_fee_rate is true the open channel announcement will update the
+    channel fee rate with the value specified in fee_rate. In the case of
+    a fee_rate of 0 use_fee_rate is needed downstream to distinguish whether
+    to use the default fee rate value specified in the config or 0.
+    */
+    bool use_fee_rate = 24;
+
+    /*
+    The number of satoshis we require the remote peer to reserve. This value,
+    if specified, must be above the dust limit and below 20% of the channel
+    capacity.
+    */
+    uint64 remote_chan_reserve_sat = 25;
+
+    /*
+    If set, then lnd will attempt to commit all the coins under control of the
+    internal wallet to open the channel, and the LocalFundingAmount field must
+    be zero and is ignored.
+    */
+    bool fund_max = 26;
+
+    /*
+    An optional note-to-self to go along with the channel containing some
+    useful information. This is only ever stored locally and in no way impacts
+    the channel's operation.
+    */
 }
 message OpenStatusUpdate {
     oneof update {

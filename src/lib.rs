@@ -318,9 +318,9 @@ where
     let mut endpoint = try_map_err!(address.try_into(),
         |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), });
 
-    // Configure TLS to skip certificate verification
-    let mut tls_config = rustls::ClientConfig::new(); // Changed from builder() to new()
-    tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier {}));
+    // Configure TLS to skip all certificate verification
+    let mut tls_config = rustls::ClientConfig::new();
+    tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier));
     tls_config.enable_sni = false;
 
     let channel = endpoint
@@ -389,7 +389,7 @@ where
 }
 
 // Add this struct and implementation
-struct NoVerifier {}
+struct NoVerifier;
 
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
@@ -399,6 +399,7 @@ impl ServerCertVerifier for NoVerifier {
         _dns_name: DNSNameRef,
         _ocsp_response: &[u8],
     ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+        // Always return Ok, effectively bypassing all certificate checks
         Ok(rustls::ServerCertVerified::assertion())
     }
 }

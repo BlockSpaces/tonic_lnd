@@ -69,7 +69,8 @@ use std::convert::TryInto;
 pub use error::ConnectError;
 use error::InternalConnectError;
 use tonic::codegen::InterceptedService;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
+use std::time::Duration;
 
 #[cfg(feature = "tracing")]
 use tracing;
@@ -307,22 +308,25 @@ mod tls {
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
 pub async fn connect<A, MP>(address: A, macaroon_file: MP) -> Result<Client, ConnectError>
 where
-    A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
-    <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static,
+    A: TryInto<Endpoint> + std::fmt::Debug + ToString,
+    <A as TryInto<Endpoint>>::Error: std::error::Error + Send + Sync + 'static,
     MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
 {
     let address_str = address.to_string();
-    let mut endpoint = try_map_err!(address.try_into(),
+    let endpoint = try_map_err!(address.try_into(),
         |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), });
 
-    // Use a default TLS configuration that doesn't require a certificate
-    let tls_config = tonic::transport::ClientTlsConfig::new();
-    endpoint = endpoint.tls_config(tls_config)
-        .map_err(InternalConnectError::TlsConfig)?;
-
-    let channel = endpoint.connect()
+    // Configure the channel with more options
+    let channel = endpoint
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .tcp_nodelay(true)
+        .timeout(Duration::from_secs(30))
+        .connect()
         .await
-        .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
+        .map_err(|error| {
+            eprintln!("Connection error: {:?}", error);
+            InternalConnectError::Connect { address: address_str, error }
+        })?;
 
     let macaroon = load_macaroon(macaroon_file).await?;
     let interceptor = MacaroonInterceptor { macaroon };

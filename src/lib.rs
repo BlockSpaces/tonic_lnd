@@ -305,45 +305,44 @@ mod tls {
 /// If you have a motivating use case for use of direct data feel free to open an issue and
 /// explain.
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) -> Result<Client, ConnectError>
+pub async fn connect<A, MP>(address: A, macaroon_file: MP) -> Result<Client, ConnectError>
 where
     A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
     <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static,
-    CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug,
     MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
 {
     let address_str = address.to_string();
     let mut endpoint = try_map_err!(address.try_into(),
         |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), });
 
-    if let Some(tls_config) = tls::config(cert_file).await? {
-        endpoint = endpoint.tls_config(tls_config)
-            .map_err(InternalConnectError::TlsConfig)?;
-    }
+    // Use a default TLS configuration that doesn't require a certificate
+    let tls_config = tonic::transport::ClientTlsConfig::new();
+    endpoint = endpoint.tls_config(tls_config)
+        .map_err(InternalConnectError::TlsConfig)?;
 
-    let conn = endpoint.connect()
+    let channel = endpoint.connect()
         .await
         .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
 
     let macaroon = load_macaroon(macaroon_file).await?;
-
-    let interceptor = MacaroonInterceptor { macaroon, };
+    let interceptor = MacaroonInterceptor { macaroon };
 
     let client = Client {
-        lightning: lnrpc::lightning_client::LightningClient::with_interceptor(conn.clone(), interceptor.clone()),
-        wallet: walletrpc::wallet_kit_client::WalletKitClient::with_interceptor(conn.clone(), interceptor.clone()),
-        router: routerrpc::router_client::RouterClient::with_interceptor(conn.clone(), interceptor.clone()),
-        loopclient: looprpc::swap_client_client::SwapClientClient::with_interceptor(conn.clone(), interceptor.clone()),
-        faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(conn.clone(), interceptor.clone()),
-        invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(conn.clone(), interceptor.clone()),
-        wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(conn.clone(), interceptor.clone()),
-        state: lnrpc::state_client::StateClient::with_interceptor(conn.clone(), interceptor.clone()),
+        lightning: lnrpc::lightning_client::LightningClient::with_interceptor(channel.clone(), interceptor.clone()),
+        wallet: walletrpc::wallet_kit_client::WalletKitClient::with_interceptor(channel.clone(), interceptor.clone()),
+        router: routerrpc::router_client::RouterClient::with_interceptor(channel.clone(), interceptor.clone()),
+        loopclient: looprpc::swap_client_client::SwapClientClient::with_interceptor(channel.clone(), interceptor.clone()),
+        faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(channel.clone(), interceptor.clone()),
+        invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(channel.clone(), interceptor.clone()),
+        wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(channel.clone(), interceptor.clone()),
+        state: lnrpc::state_client::StateClient::with_interceptor(channel.clone(), interceptor),
     };
+
     Ok(client)
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as_hex: String) -> Result<Client, ConnectError>
+pub async fn in_mem_connect<A>(address: A, macaroon_as_hex: String) -> Result<Client, ConnectError>
 where
     A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
     <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static
@@ -352,28 +351,27 @@ where
     let mut endpoint = try_map_err!(address.try_into(),
         |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), });
 
-    if let Some(tls_config) = tls::config_with_hex(cert_file_as_hex).await? {
-        endpoint = endpoint.tls_config(tls_config)
-            .map_err(InternalConnectError::TlsConfig)?;
-    }
+    // Use a default TLS configuration that doesn't require a certificate
+    let tls_config = tonic::transport::ClientTlsConfig::new();
+    endpoint = endpoint.tls_config(tls_config)
+        .map_err(InternalConnectError::TlsConfig)?;
 
-    let conn = endpoint.connect()
+    let channel = endpoint.connect()
         .await
         .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
 
-    let macaroon = macaroon_as_hex;
-
-    let interceptor = MacaroonInterceptor { macaroon, };
+    let interceptor = MacaroonInterceptor { macaroon: macaroon_as_hex };
 
     let client = Client {
-        lightning: lnrpc::lightning_client::LightningClient::with_interceptor(conn.clone(), interceptor.clone()),
-        wallet: walletrpc::wallet_kit_client::WalletKitClient::with_interceptor(conn.clone(), interceptor.clone()),
-        router: routerrpc::router_client::RouterClient::with_interceptor(conn.clone(), interceptor.clone()),
-        loopclient: looprpc::swap_client_client::SwapClientClient::with_interceptor(conn.clone(), interceptor.clone()),
-        faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(conn.clone(), interceptor.clone()),
-        invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(conn.clone(), interceptor.clone()),
-        wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(conn.clone(), interceptor.clone()),
-        state: lnrpc::state_client::StateClient::with_interceptor(conn.clone(), interceptor.clone()),
+        lightning: lnrpc::lightning_client::LightningClient::with_interceptor(channel.clone(), interceptor.clone()),
+        wallet: walletrpc::wallet_kit_client::WalletKitClient::with_interceptor(channel.clone(), interceptor.clone()),
+        router: routerrpc::router_client::RouterClient::with_interceptor(channel.clone(), interceptor.clone()),
+        loopclient: looprpc::swap_client_client::SwapClientClient::with_interceptor(channel.clone(), interceptor.clone()),
+        faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(channel.clone(), interceptor.clone()),
+        invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(channel.clone(), interceptor.clone()),
+        wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(channel.clone(), interceptor.clone()),
+        state: lnrpc::state_client::StateClient::with_interceptor(channel.clone(), interceptor),
     };
+
     Ok(client)
 }

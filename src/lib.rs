@@ -71,6 +71,8 @@ use error::InternalConnectError;
 use tonic::codegen::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 use std::time::Duration;
+use rustls::{Certificate, ServerCertVerifier};
+use webpki::DNSNameRef;
 
 #[cfg(feature = "tracing")]
 use tracing;
@@ -313,11 +315,17 @@ where
     MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
 {
     let address_str = address.to_string();
-    let endpoint = try_map_err!(address.try_into(),
+    let mut endpoint = try_map_err!(address.try_into(),
         |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), });
 
-    // Configure the channel with more options
+    // Configure TLS to skip certificate verification
+    let mut tls_config = rustls::ClientConfig::new(); // Changed from builder() to new()
+    tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier {}));
+    tls_config.enable_sni = false;
+
     let channel = endpoint
+        .tls_config(tonic::transport::ClientTlsConfig::new().rustls_client_config(tls_config))
+        .map_err(|e| InternalConnectError::TlsConfig(e))?
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .tcp_nodelay(true)
         .timeout(Duration::from_secs(30))
@@ -378,4 +386,19 @@ where
     };
 
     Ok(client)
+}
+
+// Add this struct and implementation
+struct NoVerifier {}
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _roots: &rustls::RootCertStore,
+        _presented_certs: &[Certificate],
+        _dns_name: DNSNameRef,
+        _ocsp_response: &[u8],
+    ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+        Ok(rustls::ServerCertVerified::assertion())
+    }
 }

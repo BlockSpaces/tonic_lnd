@@ -35,7 +35,7 @@ async fn main() {
     let address = address.into_string().expect("address is not UTF-8");
 
     // Connecting to LND requires only address, cert file, and macaroon file
-    let mut client = tonic_lnd::connect(address, "", macaroon_file)
+    let mut client = tonic_lnd::connect(address, macaroon_file)
         .await
         .expect("failed to connect");
 
@@ -320,7 +320,7 @@ where
 
     // Configure TLS to skip all certificate verification
     let mut tls_config = rustls::ClientConfig::new();
-    tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier));
+    tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoCertificateVerification));
     tls_config.enable_sni = false;
 
     let channel = endpoint
@@ -389,17 +389,16 @@ where
 }
 
 // Add this struct and implementation
-struct NoVerifier;
+struct NoCertificateVerification;
 
-impl ServerCertVerifier for NoVerifier {
+impl rustls::ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
         &self,
         _roots: &rustls::RootCertStore,
-        _presented_certs: &[Certificate],
-        _dns_name: DNSNameRef,
+        _presented_certs: &[rustls::Certificate],
+        _dns_name: webpki::DNSNameRef,
         _ocsp_response: &[u8],
     ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
-        // Always return Ok, effectively bypassing all certificate checks
         Ok(rustls::ServerCertVerified::assertion())
     }
 }

@@ -299,56 +299,18 @@ mod tls {
     }
 
     impl CertVerifier {
-        pub(crate) async fn load(path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
-            let contents = try_map_err!(tokio::fs::read(&path).await,
-                |error| InternalConnectError::ReadFile { file: path.into(), error });
-            let mut reader = &*contents;
-
-            let certs = try_map_err!(rustls_pemfile::certs(&mut reader),
-                |error| InternalConnectError::ParseCert { file: path.into(), error });
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
+        pub(crate) async fn load(_path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
+            Ok(CertVerifier { certs: Vec::new() })
         }
-
-        pub(crate) async fn load_as_hex(file_as_hex: String) -> Result<Self, InternalConnectError> {
-            let contents = hex::decode(file_as_hex).expect("Please provide tls cert as hex");
-            let mut reader = &*contents;
-
-            let certs = rustls_pemfile::certs(&mut reader).expect("Expected to be able to make cert from cert as hex");
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
+    
+        pub(crate) async fn load_as_hex(_file_as_hex: String) -> Result<Self, InternalConnectError> {
+            Ok(CertVerifier { certs: Vec::new() })
         }
     }
-
+    
     impl rustls::ServerCertVerifier for CertVerifier {
-        fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-
-            // if self.certs.len() != presented_certs.len() {
-            //     return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
-            // }
-
-            // for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
-            //     if *p.0 != **c {
-            //         return Err(TLSError::General(format!("Server certificates do not match ours")));
-            //     } else {
-            //         #[cfg(feature = "tracing")] {
-            //             tracing::trace!("Confirmed certificate match");
-            //         }
-            //     }
-            // }
-
+        fn verify_server_cert(&self, _roots: &RootCertStore, _presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
+            // Always return Ok, effectively bypassing certificate verification
             Ok(ServerCertVerified::assertion())
         }
     }

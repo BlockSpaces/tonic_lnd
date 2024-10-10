@@ -23,19 +23,19 @@ Here's an example of retrieving information from LND (`getinfo` call).
 You can find the same example in crate root for your convenience.
 
 ```no_run
-// This program accepts three arguments: address, cert file, macaroon file
+// This program accepts two or three arguments: address, macaroon file, and optionally cert file
 // The address must start with `https://`!
 
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args.next().expect("missing arguments: address, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
+    let cert_file = args.next(); // This is now optional
     let address = address.into_string().expect("address is not UTF-8");
 
-    // Connecting to LND requires only address, cert file, and macaroon file
+    // Connecting to LND now allows optional cert file
     let mut client = tonic_lnd::connect(address, cert_file, macaroon_file)
         .await
         .expect("failed to connect");
@@ -217,15 +217,36 @@ async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String,
 /// If you have a motivating use case for use of direct data feel free to open an issue and
 /// explain.
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static, CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug, MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug {
+pub async fn connect<A, CP, MP>(
+    address: A,
+    cert_file: Option<CP>,
+    macaroon_file: MP
+) -> Result<Client, ConnectError>
+where
+    A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
+    <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static,
+    CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug,
+    MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
+{
     let address_str = address.to_string();
-    let conn = try_map_err!(address
-        .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config(cert_file).await?)
-        .map_err(InternalConnectError::TlsConfig)?
-        .connect()
-        .await
-        .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
+    let conn = try_map_err!(address.try_into(), |error| InternalConnectError::InvalidAddress {
+        address: address_str.clone(),
+        error: Box::new(error),
+    })
+    .tls_config(
+        if let Some(cert_file) = cert_file {
+            tls::config(cert_file).await?
+        } else {
+            tls::insecure_config()
+        }
+    )
+    .map_err(InternalConnectError::TlsConfig)?
+    .connect()
+    .await
+    .map_err(|error| InternalConnectError::Connect {
+        address: address_str,
+        error,
+    })?;
 
     let macaroon = load_macaroon(macaroon_file).await?;
 
@@ -245,15 +266,34 @@ pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) ->
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as_hex: String) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static {
+pub async fn in_mem_connect<A>(
+    address: A,
+    cert_file_as_hex: Option<String>,
+    macaroon_as_hex: String
+) -> Result<Client, ConnectError>
+where
+    A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
+    <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static
+{
     let address_str = address.to_string();
-    let conn = try_map_err!(address
-        .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config_with_hex(cert_file_as_hex).await?)
-        .map_err(InternalConnectError::TlsConfig)?
-        .connect()
-        .await
-        .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
+    let conn = try_map_err!(address.try_into(), |error| InternalConnectError::InvalidAddress {
+        address: address_str.clone(),
+        error: Box::new(error),
+    })
+    .tls_config(
+        if let Some(cert_file_as_hex) = cert_file_as_hex {
+            tls::config_with_hex(cert_file_as_hex).await?
+        } else {
+            tls::insecure_config()
+        }
+    )
+    .map_err(InternalConnectError::TlsConfig)?
+    .connect()
+    .await
+    .map_err(|error| InternalConnectError::Connect {
+        address: address_str,
+        error,
+    })?;
 
     let macaroon = macaroon_as_hex;
 
@@ -311,6 +351,27 @@ mod tls {
     impl rustls::ServerCertVerifier for CertVerifier {
         fn verify_server_cert(&self, _roots: &RootCertStore, _presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
             // Always return Ok, effectively bypassing certificate verification
+            Ok(ServerCertVerified::assertion())
+        }
+    }
+
+    pub(crate) fn insecure_config() -> tonic::transport::ClientTlsConfig {
+        let mut tls_config = rustls::ClientConfig::new();
+        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier {}));
+        tls_config.set_protocols(&["h2".into()]);
+        tonic::transport::ClientTlsConfig::new().rustls_client_config(tls_config)
+    }
+
+    struct NoVerifier {}
+
+    impl rustls::ServerCertVerifier for NoVerifier {
+        fn verify_server_cert(
+            &self,
+            _roots: &RootCertStore,
+            _presented_certs: &[Certificate],
+            _dns_name: DNSNameRef<'_>,
+            _ocsp_response: &[u8]
+        ) -> Result<ServerCertVerified, TLSError> {
             Ok(ServerCertVerified::assertion())
         }
     }

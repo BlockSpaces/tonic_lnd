@@ -335,19 +335,19 @@ mod tls {
     impl rustls::ServerCertVerifier for CertVerifier {
         fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
 
-            if self.certs.len() != presented_certs.len() {
-                return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
-            }
+            // if self.certs.len() != presented_certs.len() {
+            //     return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
+            // }
 
-            for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
-                if *p.0 != **c {
-                    return Err(TLSError::General(format!("Server certificates do not match ours")));
-                } else {
-                    #[cfg(feature = "tracing")] {
-                        tracing::trace!("Confirmed certificate match");
-                    }
-                }
-            }
+            // for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
+            //     if *p.0 != **c {
+            //         return Err(TLSError::General(format!("Server certificates do not match ours")));
+            //     } else {
+            //         #[cfg(feature = "tracing")] {
+            //             tracing::trace!("Confirmed certificate match");
+            //         }
+            //     }
+            // }
 
             Ok(ServerCertVerified::assertion())
         }

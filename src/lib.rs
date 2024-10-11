@@ -318,48 +318,26 @@ mod tls {
     use webpki::DNSNameRef;
     use crate::error::{ConnectError, InternalConnectError};
 
-    pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
-        let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
-        tls_config.set_protocols(&["h2".into()]);
-        Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(tls_config))
-    }
-
-    pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
-        let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(file_as_hex).await?));
-        tls_config.set_protocols(&["h2".into()]);
-        Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(tls_config))
-    }
-
-    pub(crate) struct CertVerifier {
-        certs: Vec<Vec<u8>>
-    }
-
-    impl CertVerifier {
-        pub(crate) async fn load(_path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
-            Ok(CertVerifier { certs: Vec::new() })
-        }
-    
-        pub(crate) async fn load_as_hex(_file_as_hex: String) -> Result<Self, InternalConnectError> {
-            Ok(CertVerifier { certs: Vec::new() })
-        }
-    }
-    
-    impl rustls::ServerCertVerifier for CertVerifier {
-        fn verify_server_cert(&self, _roots: &RootCertStore, _presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-            // Always return Ok, effectively bypassing certificate verification
-            Ok(ServerCertVerified::assertion())
-        }
-    }
-
-    pub(crate) fn insecure_config() -> tonic::transport::ClientTlsConfig {
+    fn create_insecure_config() -> rustls::ClientConfig {
         let mut tls_config = rustls::ClientConfig::new();
         tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier {}));
         tls_config.set_protocols(&["h2".into()]);
-        tonic::transport::ClientTlsConfig::new().rustls_client_config(tls_config)
+        tls_config
+    }
+
+    pub(crate) async fn config(_path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        Ok(tonic::transport::ClientTlsConfig::new()
+            .rustls_client_config(create_insecure_config()))
+    }
+
+    pub(crate) async fn config_with_hex(_file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        Ok(tonic::transport::ClientTlsConfig::new()
+            .rustls_client_config(create_insecure_config()))
+    }
+
+    pub(crate) fn insecure_config() -> tonic::transport::ClientTlsConfig {
+        tonic::transport::ClientTlsConfig::new()
+            .rustls_client_config(create_insecure_config())
     }
 
     struct NoVerifier {}

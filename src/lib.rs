@@ -68,9 +68,11 @@ pub extern crate tonic;
 use std::path::{Path, PathBuf};
 use std::convert::TryInto;
 pub use error::ConnectError;
-use error::InternalConnectError;
 use tonic::codegen::InterceptedService;
 use tonic::transport::Channel;
+use tonic::transport::ClientTlsConfig;
+use rustls::{RootCertStore, Certificate, ServerCertVerifier, TLSError};
+use webpki::DNSNameRef;
 
 #[cfg(feature = "tracing")]
 use tracing;
@@ -198,10 +200,12 @@ impl tonic::service::Interceptor for MacaroonInterceptor {
     }
 }
 
-async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String, InternalConnectError> {
+async fn load_macaroon(
+    path: impl AsRef<Path> + Into<PathBuf>,
+) -> Result<String, ConnectError> {
     let macaroon = tokio::fs::read(&path)
         .await
-        .map_err(|error| InternalConnectError::ReadFile { file: path.into(), error, })?;
+        .map_err(|error| ConnectError::Other(Box::new(error)))?;
     Ok(hex::encode(&macaroon))
 }
 
@@ -229,24 +233,25 @@ where
     MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
 {
     let address_str = address.to_string();
-    let conn = try_map_err!(address.try_into(), |error| InternalConnectError::InvalidAddress {
-        address: address_str.clone(),
-        error: Box::new(error),
-    })
-    .tls_config(
-        if let Some(cert_file) = cert_file {
-            tls::config(cert_file).await?
-        } else {
-            tls::insecure_config()
-        }
-    )
-    .map_err(InternalConnectError::TlsConfig)?
-    .connect()
-    .await
-    .map_err(|error| InternalConnectError::Connect {
-        address: address_str,
-        error,
-    })?;
+    let conn = address.try_into()
+        .map_err(|error| ConnectError::InvalidAddress {
+            address: address_str.clone(),
+            error: Box::new(error),
+        })?
+        .tls_config(
+            if let Some(cert_file) = cert_file {
+                tls::config(cert_file).await?
+            } else {
+                tls::insecure_config()
+            }
+        )
+        .map_err(ConnectError::TlsConfig)?
+        .connect()
+        .await
+        .map_err(|error| ConnectError::Connect {
+            address: address_str,
+            error,
+        })?;
 
     let macaroon = load_macaroon(macaroon_file).await?;
 
@@ -276,7 +281,7 @@ where
     <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static
 {
     let address_str = address.to_string();
-    let conn = try_map_err!(address.try_into(), |error| InternalConnectError::InvalidAddress {
+    let conn = try_map_err!(address.try_into(), |error| ConnectError::InvalidAddress {
         address: address_str.clone(),
         error: Box::new(error),
     })
@@ -287,10 +292,10 @@ where
             tls::insecure_config()
         }
     )
-    .map_err(InternalConnectError::TlsConfig)?
+    .map_err(ConnectError::TlsConfig)?
     .connect()
     .await
-    .map_err(|error| InternalConnectError::Connect {
+    .map_err(|error| ConnectError::Connect {
         address: address_str,
         error,
     })?;
@@ -313,10 +318,7 @@ where
 }
 
 mod tls {
-    use std::path::{Path, PathBuf};
-    use rustls::{RootCertStore, Certificate, TLSError, ServerCertVerified};
-    use webpki::DNSNameRef;
-    use crate::error::{ConnectError, InternalConnectError};
+    use super::*;
 
     fn create_insecure_config() -> rustls::ClientConfig {
         let mut tls_config = rustls::ClientConfig::new();
@@ -330,9 +332,21 @@ mod tls {
             .rustls_client_config(create_insecure_config()))
     }
 
-    pub(crate) async fn config_with_hex(_file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
-        Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(create_insecure_config()))
+    pub(crate) async fn config_with_pem(pem: Vec<u8>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        let cert = Certificate(pem);
+        let mut roots = RootCertStore::empty();
+        roots.add(&cert).map_err(|_| ConnectError::InvalidCertificate)?;
+
+        let mut tls_config = rustls::ClientConfig::new();
+        tls_config.root_store = roots;
+        tls_config.set_protocols(&["h2".into()]);
+
+        Ok(tonic::transport::ClientTlsConfig::new().rustls_client_config(tls_config))
+    }
+
+    pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        let pem = hex::decode(file_as_hex).map_err(|_| ConnectError::InvalidCertificate)?;
+        config_with_pem(pem).await
     }
 
     pub(crate) fn insecure_config() -> tonic::transport::ClientTlsConfig {
@@ -342,15 +356,15 @@ mod tls {
 
     struct NoVerifier {}
 
-    impl rustls::ServerCertVerifier for NoVerifier {
+    impl ServerCertVerifier for NoVerifier {
         fn verify_server_cert(
             &self,
             _roots: &RootCertStore,
             _presented_certs: &[Certificate],
             _dns_name: DNSNameRef<'_>,
             _ocsp_response: &[u8]
-        ) -> Result<ServerCertVerified, TLSError> {
-            Ok(ServerCertVerified::assertion())
+        ) -> Result<rustls::ServerCertVerified, TLSError> {
+            Ok(rustls::ServerCertVerified::assertion())
         }
     }
 }

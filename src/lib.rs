@@ -23,19 +23,19 @@ Here's an example of retrieving information from LND (`getinfo` call).
 You can find the same example in crate root for your convenience.
 
 ```no_run
-// This program accepts three arguments: address, cert file, macaroon file
+// This program accepts two or three arguments: address, macaroon file, and optionally cert file
 // The address must start with `https://`!
 
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args.next().expect("missing arguments: address, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
+    let cert_file = args.next(); // This is now optional
     let address = address.into_string().expect("address is not UTF-8");
 
-    // Connecting to LND requires only address, cert file, and macaroon file
+    // Connecting to LND now allows optional cert file
     let mut client = tonic_lnd::connect(address, cert_file, macaroon_file)
         .await
         .expect("failed to connect");
@@ -68,9 +68,11 @@ pub extern crate tonic;
 use std::path::{Path, PathBuf};
 use std::convert::TryInto;
 pub use error::ConnectError;
-use error::InternalConnectError;
 use tonic::codegen::InterceptedService;
 use tonic::transport::Channel;
+use tonic::transport::ClientTlsConfig;
+use rustls::{RootCertStore, Certificate, ServerCertVerifier, TLSError};
+use webpki::DNSNameRef;
 
 #[cfg(feature = "tracing")]
 use tracing;
@@ -85,6 +87,7 @@ pub type LoopClient = looprpc::swap_client_client::SwapClientClient<InterceptedS
 pub type FaradayServerClient = frdrpc::faraday_server_client::FaradayServerClient<InterceptedService<Channel, MacaroonInterceptor>>;
 pub type InvoicesClient = invoicesrpc::invoices_client::InvoicesClient<InterceptedService<Channel, MacaroonInterceptor>>;
 pub type WalletUnlockerClient = lnrpc::wallet_unlocker_client::WalletUnlockerClient<InterceptedService<Channel, MacaroonInterceptor>>;
+pub type StateClient = lnrpc::state_client::StateClient<InterceptedService<Channel, MacaroonInterceptor>>;
 
 /// The client returned by `connect` function
 ///
@@ -93,10 +96,11 @@ pub struct Client {
     lightning: LightningClient,
     wallet: WalletKitClient,
     router: RouterClient,
-    loopclient: LoopClient, 
+    loopclient: LoopClient,
     faraday: FaradayServerClient,
     invoices: InvoicesClient,
     wallet_unlocker: WalletUnlockerClient,
+    state: StateClient,
 }
 
 impl Client {
@@ -128,6 +132,10 @@ impl Client {
 
     pub fn wallet_unlocker(&mut self) -> &mut WalletUnlockerClient {
         &mut self.wallet_unlocker
+    }
+
+    pub fn state(&mut self) -> &mut StateClient {
+        &mut self.state
     }
 }
 
@@ -192,10 +200,12 @@ impl tonic::service::Interceptor for MacaroonInterceptor {
     }
 }
 
-async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String, InternalConnectError> {
+async fn load_macaroon(
+    path: impl AsRef<Path> + Into<PathBuf>,
+) -> Result<String, ConnectError> {
     let macaroon = tokio::fs::read(&path)
         .await
-        .map_err(|error| InternalConnectError::ReadFile { file: path.into(), error, })?;
+        .map_err(|error| ConnectError::Other(Box::new(error)))?;
     Ok(hex::encode(&macaroon))
 }
 
@@ -211,15 +221,37 @@ async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String,
 /// If you have a motivating use case for use of direct data feel free to open an issue and
 /// explain.
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static, CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug, MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug {
+pub async fn connect<A, CP, MP>(
+    address: A,
+    cert_file: Option<CP>,
+    macaroon_file: MP
+) -> Result<Client, ConnectError>
+where
+    A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
+    <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static,
+    CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug,
+    MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug
+{
     let address_str = address.to_string();
-    let conn = try_map_err!(address
-        .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config(cert_file).await?)
-        .map_err(InternalConnectError::TlsConfig)?
+    let conn = address.try_into()
+        .map_err(|error| ConnectError::InvalidAddress {
+            address: address_str.clone(),
+            error: Box::new(error),
+        })?
+        .tls_config(
+            if let Some(cert_file) = cert_file {
+                tls::config(cert_file).await?
+            } else {
+                tls::insecure_config()
+            }
+        )
+        .map_err(ConnectError::TlsConfig)?
         .connect()
         .await
-        .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
+        .map_err(|error| ConnectError::Connect {
+            address: address_str,
+            error,
+        })?;
 
     let macaroon = load_macaroon(macaroon_file).await?;
 
@@ -233,20 +265,40 @@ pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) ->
         faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(conn.clone(), interceptor.clone()),
         invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(conn.clone(), interceptor.clone()),
         wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(conn.clone(), interceptor.clone()),
+        state: lnrpc::state_client::StateClient::with_interceptor(conn.clone(), interceptor.clone()),
     };
     Ok(client)
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
-pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as_hex: String) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static {
+pub async fn in_mem_connect<A>(
+    address: A,
+    cert_file_as_hex: Option<String>,
+    macaroon_as_hex: String
+) -> Result<Client, ConnectError>
+where
+    A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString,
+    <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static
+{
     let address_str = address.to_string();
-    let conn = try_map_err!(address
-        .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config_with_hex(cert_file_as_hex).await?)
-        .map_err(InternalConnectError::TlsConfig)?
-        .connect()
-        .await
-        .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
+    let conn = try_map_err!(address.try_into(), |error| ConnectError::InvalidAddress {
+        address: address_str.clone(),
+        error: Box::new(error),
+    })
+    .tls_config(
+        if let Some(cert_file_as_hex) = cert_file_as_hex {
+            tls::config_with_hex(cert_file_as_hex).await?
+        } else {
+            tls::insecure_config()
+        }
+    )
+    .map_err(ConnectError::TlsConfig)?
+    .connect()
+    .await
+    .map_err(|error| ConnectError::Connect {
+        address: address_str,
+        error,
+    })?;
 
     let macaroon = macaroon_as_hex;
 
@@ -260,88 +312,59 @@ pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as
         faraday: frdrpc::faraday_server_client::FaradayServerClient::with_interceptor(conn.clone(), interceptor.clone()),
         invoices: invoicesrpc::invoices_client::InvoicesClient::with_interceptor(conn.clone(), interceptor.clone()),
         wallet_unlocker: lnrpc::wallet_unlocker_client::WalletUnlockerClient::with_interceptor(conn.clone(), interceptor.clone()),
+        state: lnrpc::state_client::StateClient::with_interceptor(conn.clone(), interceptor.clone()),
     };
     Ok(client)
 }
 
 mod tls {
-    use std::path::{Path, PathBuf};
-    use rustls::{RootCertStore, Certificate, TLSError, ServerCertVerified};
-    use webpki::DNSNameRef;
-    use crate::error::{ConnectError, InternalConnectError};
+    use super::*;
 
-    pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+    fn create_insecure_config() -> rustls::ClientConfig {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerifier {}));
         tls_config.set_protocols(&["h2".into()]);
+        tls_config
+    }
+
+    pub(crate) async fn config(_path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(tls_config))
+            .rustls_client_config(create_insecure_config()))
+    }
+
+    pub(crate) async fn config_with_pem(pem: Vec<u8>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        let cert = Certificate(pem);
+        let mut roots = RootCertStore::empty();
+        roots.add(&cert).map_err(|_| ConnectError::InvalidCertificate)?;
+
+        let mut tls_config = rustls::ClientConfig::new();
+        tls_config.root_store = roots;
+        tls_config.set_protocols(&["h2".into()]);
+
+        Ok(tonic::transport::ClientTlsConfig::new().rustls_client_config(tls_config))
     }
 
     pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
-        let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(file_as_hex).await?));
-        tls_config.set_protocols(&["h2".into()]);
-        Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(tls_config))
+        let pem = hex::decode(file_as_hex).map_err(|_| ConnectError::InvalidCertificate)?;
+        config_with_pem(pem).await
     }
 
-    pub(crate) struct CertVerifier {
-        certs: Vec<Vec<u8>>
+    pub(crate) fn insecure_config() -> tonic::transport::ClientTlsConfig {
+        tonic::transport::ClientTlsConfig::new()
+            .rustls_client_config(create_insecure_config())
     }
 
-    impl CertVerifier {
-        pub(crate) async fn load(path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
-            let contents = try_map_err!(tokio::fs::read(&path).await,
-                |error| InternalConnectError::ReadFile { file: path.into(), error });
-            let mut reader = &*contents;
+    struct NoVerifier {}
 
-            let certs = try_map_err!(rustls_pemfile::certs(&mut reader),
-                |error| InternalConnectError::ParseCert { file: path.into(), error });
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-
-        pub(crate) async fn load_as_hex(file_as_hex: String) -> Result<Self, InternalConnectError> {
-            let contents = hex::decode(file_as_hex).expect("Please provide tls cert as hex");
-            let mut reader = &*contents;
-
-            let certs = rustls_pemfile::certs(&mut reader).expect("Expected to be able to make cert from cert as hex");
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-    }
-
-    impl rustls::ServerCertVerifier for CertVerifier {
-        fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-            
-            if self.certs.len() != presented_certs.len() {
-                return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
-            }
-            
-            for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
-                if *p.0 != **c {
-                    return Err(TLSError::General(format!("Server certificates do not match ours")));
-                } else {
-                    #[cfg(feature = "tracing")] {
-                        tracing::trace!("Confirmed certificate match");
-                    }
-                }
-            }
-
-            Ok(ServerCertVerified::assertion())
+    impl ServerCertVerifier for NoVerifier {
+        fn verify_server_cert(
+            &self,
+            _roots: &RootCertStore,
+            _presented_certs: &[Certificate],
+            _dns_name: DNSNameRef<'_>,
+            _ocsp_response: &[u8]
+        ) -> Result<rustls::ServerCertVerified, TLSError> {
+            Ok(rustls::ServerCertVerified::assertion())
         }
     }
 }

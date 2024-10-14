@@ -1,6 +1,6 @@
 [package]
 name = "tonic_lnd"
-version = "0.8.0"
+version = "0.25.0"
 authors = ["Martin Habovstiak <martin.habovstiak@gmail.com>"]
 edition = "2018"
 description = "An async library implementing LND RPC via tonic and prost"
@@ -22,6 +22,7 @@ tokio = { version = "1.7.1", features = ["fs"] }
 tracing = { version = "0.1", features = ["log"], optional = true }
 rust_decimal = { version = "1.26.1", features = ["db-postgres"] }
 rust_decimal_macros = "1.26.1"
+webpki-roots = "0.19.0"
 
 rand = "0.8.5"
 serde = { version = "1.0.145", features = ["derive"] }

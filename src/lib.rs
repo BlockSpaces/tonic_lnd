@@ -221,7 +221,7 @@ pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) ->
     let address_str = address.to_string();
     let conn = try_map_err!(address
         .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config(cert_file).await?)
+        .tls_config(tls::config(Some(cert_file)).await?)
         .map_err(InternalConnectError::TlsConfig)?
         .connect()
         .await
@@ -249,7 +249,7 @@ pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as
     let address_str = address.to_string();
     let conn = try_map_err!(address
         .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
-        .tls_config(tls::config_with_hex(cert_file_as_hex).await?)
+        .tls_config(tls::config_with_hex(Some(cert_file_as_hex)).await?)
         .map_err(InternalConnectError::TlsConfig)?
         .connect()
         .await
@@ -277,18 +277,43 @@ mod tls {
     use rustls::{RootCertStore, Certificate, TLSError, ServerCertVerified};
     use webpki::DNSNameRef;
     use crate::error::{ConnectError, InternalConnectError};
+    use webpki_roots;
 
-    pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+    pub(crate) async fn config(path: Option<impl AsRef<Path> + Into<PathBuf>>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+
+        match path {
+            Some(cert_path) if cert_path.as_ref().exists() => {
+                tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(cert_path).await?));
+            },
+            _ => {
+                tls_config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+                #[cfg(feature = "tracing")] {
+                    tracing::warn!("Certificate file not provided or does not exist. Using system trust anchors");
+                }
+            }
+        }
+
         tls_config.set_protocols(&["h2".into()]);
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))
     }
 
-    pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+    pub(crate) async fn config_with_hex(file_as_hex: Option<String>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(file_as_hex).await?));
+
+        match file_as_hex {
+            Some(hex_cert) if !hex_cert.is_empty() => {
+                tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(hex_cert).await?));
+            },
+            _ => {
+                tls_config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+                #[cfg(feature = "tracing")] {
+                    tracing::warn!("Certificate hex not provided or empty. Using system trust anchors");
+                }
+            }
+        }
+
         tls_config.set_protocols(&["h2".into()]);
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))

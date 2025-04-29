@@ -280,7 +280,8 @@ mod tls {
 
     pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+        // Create a dummy verifier that accepts any certificate
+        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(DummyVerifier {}));
         tls_config.set_protocols(&["h2".into()]);
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))
@@ -288,67 +289,25 @@ mod tls {
 
     pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(file_as_hex).await?));
+        // Create a dummy verifier that accepts any certificate
+        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(DummyVerifier {}));
         tls_config.set_protocols(&["h2".into()]);
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))
     }
 
-    pub(crate) struct CertVerifier {
-        certs: Vec<Vec<u8>>
-    }
+    // New dummy verifier that accepts any certificate
+    struct DummyVerifier {}
 
-    impl CertVerifier {
-        pub(crate) async fn load(path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
-            let contents = try_map_err!(tokio::fs::read(&path).await,
-                |error| InternalConnectError::ReadFile { file: path.into(), error });
-            let mut reader = &*contents;
-
-            let certs = try_map_err!(rustls_pemfile::certs(&mut reader),
-                |error| InternalConnectError::ParseCert { file: path.into(), error });
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-
-        pub(crate) async fn load_as_hex(file_as_hex: String) -> Result<Self, InternalConnectError> {
-            let contents = hex::decode(file_as_hex).expect("Please provide tls cert as hex");
-            let mut reader = &*contents;
-
-            let certs = rustls_pemfile::certs(&mut reader).expect("Expected to be able to make cert from cert as hex");
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-    }
-
-    impl rustls::ServerCertVerifier for CertVerifier {
-        fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-
-            if self.certs.len() != presented_certs.len() {
-                return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
-            }
-
-            for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
-                if *p.0 != **c {
-                    return Err(TLSError::General(format!("Server certificates do not match ours")));
-                } else {
-                    #[cfg(feature = "tracing")] {
-                        tracing::trace!("Confirmed certificate match");
-                    }
-                }
-            }
-
+    impl rustls::ServerCertVerifier for DummyVerifier {
+        fn verify_server_cert(
+            &self,
+            _roots: &RootCertStore,
+            _presented_certs: &[Certificate],
+            _dns_name: DNSNameRef<'_>,
+            _ocsp_response: &[u8]
+        ) -> Result<ServerCertVerified, TLSError> {
+            // Always return success
             Ok(ServerCertVerified::assertion())
         }
     }

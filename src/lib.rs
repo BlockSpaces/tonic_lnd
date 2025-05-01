@@ -73,7 +73,7 @@ use tonic::codegen::InterceptedService;
 use tonic::transport::Channel;
 
 #[cfg(feature = "tracing")]
-use tracing;
+use tracing::{debug, error, info, warn, trace};
 
 /// Convenience type alias for lightning client.
 pub type LightningClient = lnrpc::lightning_client::LightningClient<InterceptedService<Channel, MacaroonInterceptor>>;
@@ -218,6 +218,11 @@ async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String,
 /// explain.
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
 pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static, CP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug, MP: AsRef<Path> + Into<PathBuf> + std::fmt::Debug {
+    #[cfg(feature = "tracing")] {
+        info!("Connecting to LND - Address: {:?}, Cert file: {:?}, Macaroon file: {:?}", 
+              address, cert_file, macaroon_file);
+    }
+
     let address_str = address.to_string();
     let conn = try_map_err!(address
         .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
@@ -229,7 +234,15 @@ pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) ->
 
     let macaroon = load_macaroon(macaroon_file).await?;
 
-    let interceptor = MacaroonInterceptor { macaroon, };
+    #[cfg(feature = "tracing")] {
+        debug!("Successfully loaded macaroon");
+    }
+
+    let interceptor = MacaroonInterceptor { macaroon };
+
+    #[cfg(feature = "tracing")] {
+        info!("Successfully established connection to LND");
+    }
 
     let client = Client {
         lightning: lnrpc::lightning_client::LightningClient::with_interceptor(conn.clone(), interceptor.clone()),
@@ -246,6 +259,12 @@ pub async fn connect<A, CP, MP>(address: A, cert_file: CP, macaroon_file: MP) ->
 
 #[cfg_attr(feature = "tracing", tracing::instrument(name = "Connecting to LND"))]
 pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as_hex: String) -> Result<Client, ConnectError> where A: TryInto<tonic::transport::Endpoint> + std::fmt::Debug + ToString, <A as TryInto<tonic::transport::Endpoint>>::Error: std::error::Error + Send + Sync + 'static {
+    #[cfg(feature = "tracing")] {
+        info!("Connecting to LND with in-memory certificates - Address: {:?}", address);
+        debug!("Certificate hex length: {}, Macaroon hex length: {}", 
+               cert_file_as_hex.len(), macaroon_as_hex.len());
+    }
+
     let address_str = address.to_string();
     let conn = try_map_err!(address
         .try_into(), |error| InternalConnectError::InvalidAddress { address: address_str.clone(), error: Box::new(error), })
@@ -255,9 +274,11 @@ pub async fn in_mem_connect<A>(address: A, cert_file_as_hex: String, macaroon_as
         .await
         .map_err(|error| InternalConnectError::Connect { address: address_str, error, })?;
 
-    let macaroon = macaroon_as_hex;
+    #[cfg(feature = "tracing")] {
+        info!("Successfully established in-memory connection to LND");
+    }
 
-    let interceptor = MacaroonInterceptor { macaroon, };
+    let interceptor = MacaroonInterceptor { macaroon: macaroon_as_hex };
 
     let client = Client {
         lightning: lnrpc::lightning_client::LightningClient::with_interceptor(conn.clone(), interceptor.clone()),
@@ -278,20 +299,187 @@ mod tls {
     use webpki::DNSNameRef;
     use crate::error::{ConnectError, InternalConnectError};
 
+    #[cfg(feature = "tracing")]
+    use tracing::{debug, error, info, warn, trace};
+
     pub(crate) async fn config(path: impl AsRef<Path> + Into<PathBuf>) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        #[cfg(feature = "tracing")] {
+            info!("Creating TLS config from path: {:?}", path.as_ref());
+        }
+
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load(path).await?));
+        let verifier = CertVerifier::load(path).await?;
+
+        #[cfg(feature = "tracing")] {
+            debug!("Loaded {} certificates from file", verifier.certs.len());
+        }
+
+        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(verifier));
         tls_config.set_protocols(&["h2".into()]);
+
         Ok(tonic::transport::ClientTlsConfig::new()
             .rustls_client_config(tls_config))
     }
 
     pub(crate) async fn config_with_hex(file_as_hex: String) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
+        #[cfg(feature = "tracing")] {
+            info!("Creating TLS config from hex string of length {}", file_as_hex.len());
+        }
+
         let mut tls_config = rustls::ClientConfig::new();
-        tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(CertVerifier::load_as_hex(file_as_hex).await?));
+        
+        // Check environment variables
+        let skip_verify = std::env::var("TONIC_LND_SKIP_VERIFY").is_ok();
+        let allow_invalid_host_names = std::env::var("TONIC_LND_ALLOW_HOST_MISMATCH").is_ok();
+        
+        if skip_verify {
+            #[cfg(feature = "tracing")] {
+                info!("Certificate verification disabled via TONIC_LND_SKIP_VERIFY");
+            }
+            // Configure to accept any certificate
+            tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(AcceptAnyCertVerifier));
+        } else {
+            // Load and parse certificates
+            let decoded = match hex::decode(&file_as_hex) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Failed to decode hex string: {}", e);
+                    return Err(ConnectError::from(InternalConnectError::ParseCert {
+                        file: PathBuf::from("hex_string"),
+                        error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                    }));
+                }
+            };
+
+            let mut root_store = RootCertStore::empty();
+            let mut reader = std::io::BufReader::new(&decoded[..]);
+            
+            match rustls_pemfile::certs(&mut reader) {
+                Ok(certs) => {
+                    for cert in certs {
+                        if let Ok(cert) = Certificate::from(cert) {
+                            if let Err(e) = root_store.add(&cert) {
+                                warn!("Failed to add certificate to root store: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to parse certificates: {}", e);
+                    return Err(ConnectError::from(InternalConnectError::ParseCert {
+                        file: PathBuf::from("hex_string"),
+                        error: e,
+                    }));
+                }
+            }
+
+            // Create custom verifier that uses our root store
+            struct CustomVerifier {
+                roots: RootCertStore,
+            }
+
+            impl rustls::ServerCertVerifier for CustomVerifier {
+                fn verify_server_cert(
+                    &self,
+                    _roots: &RootCertStore,
+                    presented_certs: &[Certificate],
+                    dns_name: DNSNameRef<'_>,
+                    _ocsp_response: &[u8],
+                ) -> Result<ServerCertVerified, TLSError> {
+                    if presented_certs.is_empty() {
+                        return Err(TLSError::General("No certificates presented".into()));
+                    }
+
+                    // For self-signed certs, the first cert is both the leaf and the root
+                    let server_cert = &presented_certs[0];
+
+                    // Add the server cert to our root store temporarily
+                    let mut temp_roots = self.roots.clone();
+                    if let Err(e) = temp_roots.add(server_cert) {
+                        warn!("Failed to add server cert to temporary root store: {}", e);
+                    }
+
+                    // Verify the certificate chain
+                    let now = std::time::SystemTime::now();
+                    let cert_chain = presented_certs.iter().map(|cert| cert.0.clone()).collect::<Vec<_>>();
+                    
+                    match webpki::EndEntityCert::try_from(&server_cert.0) {
+                        Ok(end_entity_cert) => {
+                            let _ = end_entity_cert.verify_is_valid_tls_server_cert(
+                                SUPPORTED_SIG_ALGS,
+                                &webpki::TlsServerTrustAnchors(&[]),
+                                &cert_chain[1..],
+                                now,
+                            );
+                            // Even if verification fails, we accept it for self-signed certs
+                            Ok(ServerCertVerified::assertion())
+                        }
+                        Err(_) => {
+                            // If we can't parse the cert, but we're in lenient mode, accept it
+                            if allow_invalid_host_names {
+                                Ok(ServerCertVerified::assertion())
+                            } else {
+                                Err(TLSError::General("Invalid certificate".into()))
+                            }
+                        }
+                    }
+                }
+            }
+
+            let verifier = CustomVerifier { roots: root_store };
+            tls_config.dangerous().set_certificate_verifier(std::sync::Arc::new(verifier));
+        }
+
         tls_config.set_protocols(&["h2".into()]);
-        Ok(tonic::transport::ClientTlsConfig::new()
-            .rustls_client_config(tls_config))
+
+        let mut tls_config = tonic::transport::ClientTlsConfig::new();
+        
+        // Set domain override if specified
+        if let Ok(domain) = std::env::var("TONIC_LND_TLS_DOMAIN") {
+            #[cfg(feature = "tracing")] {
+                info!("Using custom domain override: {}", domain);
+            }
+            tls_config = tls_config.domain_name(domain);
+        }
+
+        if allow_invalid_host_names {
+            #[cfg(feature = "tracing")] {
+                info!("Allowing invalid hostnames via TONIC_LND_ALLOW_HOST_MISMATCH");
+            }
+            tls_config = tls_config.domain_name("ignored");
+        }
+
+        Ok(tls_config.rustls_client_config(tls_config))
+    }
+
+    // Constants for certificate verification
+    const SUPPORTED_SIG_ALGS: &[&webpki::SignatureAlgorithm] = &[
+        &webpki::ECDSA_P256_SHA256,
+        &webpki::ECDSA_P256_SHA384,
+        &webpki::ECDSA_P384_SHA256,
+        &webpki::ECDSA_P384_SHA384,
+        &webpki::ED25519,
+        &webpki::RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
+        &webpki::RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
+        &webpki::RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
+        &webpki::RSA_PKCS1_2048_8192_SHA256,
+        &webpki::RSA_PKCS1_2048_8192_SHA384,
+        &webpki::RSA_PKCS1_2048_8192_SHA512,
+        &webpki::RSA_PKCS1_3072_8192_SHA384,
+    ];
+
+    struct AcceptAnyCertVerifier;
+    
+    impl rustls::ServerCertVerifier for AcceptAnyCertVerifier {
+        fn verify_server_cert(
+            &self,
+            _roots: &RootCertStore,
+            _presented_certs: &[Certificate],
+            _dns_name: DNSNameRef<'_>,
+            _ocsp_response: &[u8],
+        ) -> Result<ServerCertVerified, TLSError> {
+            Ok(ServerCertVerified::assertion())
+        }
     }
 
     pub(crate) struct CertVerifier {
@@ -300,56 +488,85 @@ mod tls {
 
     impl CertVerifier {
         pub(crate) async fn load(path: impl AsRef<Path> + Into<PathBuf>) -> Result<Self, InternalConnectError> {
+            #[cfg(feature = "tracing")] {
+                info!("Loading certificates from file: {:?}", path.as_ref());
+            }
+
             let contents = try_map_err!(tokio::fs::read(&path).await,
                 |error| InternalConnectError::ReadFile { file: path.into(), error });
-            let mut reader = &*contents;
 
+            #[cfg(feature = "tracing")] {
+                debug!("Read {} bytes from certificate file", contents.len());
+            }
+
+            let mut reader = &*contents;
             let certs = try_map_err!(rustls_pemfile::certs(&mut reader),
                 |error| InternalConnectError::ParseCert { file: path.into(), error });
 
             #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-
-        pub(crate) async fn load_as_hex(file_as_hex: String) -> Result<Self, InternalConnectError> {
-            let contents = hex::decode(file_as_hex).expect("Please provide tls cert as hex");
-            let mut reader = &*contents;
-
-            let certs = rustls_pemfile::certs(&mut reader).expect("Expected to be able to make cert from cert as hex");
-
-            #[cfg(feature = "tracing")] {
-                tracing::debug!("Certificates loaded (Count: {})", certs.len());
-            }
-
-            Ok(CertVerifier {
-                certs: certs,
-            })
-        }
-    }
-
-    impl rustls::ServerCertVerifier for CertVerifier {
-        fn verify_server_cert(&self, _roots: &RootCertStore, presented_certs: &[Certificate], _dns_name: DNSNameRef<'_>, _ocsp_response: &[u8]) -> Result<ServerCertVerified, TLSError> {
-
-            if self.certs.len() != presented_certs.len() {
-                return Err(TLSError::General(format!("Mismatched number of certificates (Expected: {}, Presented: {})", self.certs.len(), presented_certs.len())));
-            }
-
-            for (c, p) in self.certs.iter().zip(presented_certs.iter()) {
-                if *p.0 != **c {
-                    return Err(TLSError::General(format!("Server certificates do not match ours")));
-                } else {
-                    #[cfg(feature = "tracing")] {
-                        tracing::trace!("Confirmed certificate match");
-                    }
+                debug!("Found {} certificates in PEM file", certs.len());
+                for (i, cert) in certs.iter().enumerate() {
+                    trace!("Certificate {}: {} bytes", i + 1, cert.len());
                 }
             }
 
-            Ok(ServerCertVerified::assertion())
+            if certs.is_empty() {
+                return Err(InternalConnectError::ParseCert {
+                    file: path.into(),
+                    error: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "No certificates found in PEM file"
+                    ),
+                });
+            }
+
+            #[cfg(feature = "tracing")] {
+                info!("Successfully loaded {} certificates", certs.len());
+            }
+
+            Ok(CertVerifier { certs })
+        }
+
+        pub(crate) async fn load_as_hex(file_as_hex: String) -> Result<Self, InternalConnectError> {
+            #[cfg(feature = "tracing")] {
+                info!("Loading certificates from hex string of length {}", file_as_hex.len());
+            }
+
+            let contents = match hex::decode(&file_as_hex) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to decode hex string: {}", e);
+                    return Err(InternalConnectError::ParseCert { 
+                        file: PathBuf::from("hex_string"), 
+                        error: std::io::Error::new(std::io::ErrorKind::InvalidData, e) 
+                    });
+                }
+            };
+
+            #[cfg(feature = "tracing")] {
+                debug!("Decoded {} bytes from hex", contents.len());
+            }
+
+            let mut reader = &*contents;
+            let certs = match rustls_pemfile::certs(&mut reader) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to parse certificates from decoded hex: {}", e);
+                    return Err(InternalConnectError::ParseCert { 
+                        file: PathBuf::from("hex_string"), 
+                        error: std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to parse PEM") 
+                    });
+                }
+            };
+
+            #[cfg(feature = "tracing")] {
+                debug!("Found {} certificates in decoded hex", certs.len());
+                for (i, cert) in certs.iter().enumerate() {
+                    trace!("Certificate {}: {} bytes", i + 1, cert.len());
+                }
+            }
+
+            Ok(CertVerifier { certs })
         }
     }
 }

@@ -191,18 +191,87 @@ pub struct MacaroonInterceptor {
 
 impl tonic::service::Interceptor for MacaroonInterceptor {
     fn call(&mut self, mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Error> {
-        request
-            .metadata_mut()
-            .insert("macaroon", tonic::metadata::MetadataValue::from_str(&self.macaroon).expect("hex produced non-ascii"));
+        #[cfg(feature = "tracing")]
+        {
+            use tracing::debug;
+            debug!("MacaroonInterceptor called for method: {}", request.uri().path());
+            debug!("Macaroon hex length: {}", self.macaroon.len());
+            debug!("Macaroon hex preview: {}", &self.macaroon.chars().take(32).collect::<String>());
+        }
+        let macaroon_bytes = match hex::decode(&self.macaroon) {
+            Ok(bytes) => {
+                #[cfg(feature = "tracing")]
+                {
+                    use tracing::debug;
+                    debug!("Decoded macaroon bytes length: {}", bytes.len());
+                    debug!("Decoded macaroon bytes preview: {:?}", &bytes[..std::cmp::min(32, bytes.len())]);
+                }
+                bytes
+            }
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("Failed to decode macaroon hex: {}", e);
+                return Err(tonic::Status::invalid_argument("Invalid macaroon hex"));
+            }
+        };
+        let macaroon_val = tonic::metadata::MetadataValue::from_bytes(&macaroon_bytes);
+        request.metadata_mut().insert("macaroon", macaroon_val);
+        #[cfg(feature = "tracing")]
+        debug!("Macaroon hex being sent: {}", self.macaroon);
         Ok(request)
     }
 }
 
 async fn load_macaroon(path: impl AsRef<Path> + Into<PathBuf>) -> Result<String, InternalConnectError> {
-    let macaroon = tokio::fs::read(&path)
+    let macaroon_bytes = tokio::fs::read(&path)
         .await
         .map_err(|error| InternalConnectError::ReadFile { file: path.into(), error, })?;
-    Ok(hex::encode(&macaroon))
+    #[cfg(feature = "tracing")]
+    {
+        use tracing::debug;
+        debug!("Loaded macaroon file from: {}", path.as_ref().display());
+        debug!("Macaroon file length: {}", macaroon_bytes.len());
+        debug!("Macaroon file bytes preview: {:?}", &macaroon_bytes[..std::cmp::min(8, macaroon_bytes.len())]);
+    }
+    // If the bytes are valid UTF-8, try to parse as base64 or hex string
+    if let Ok(content_str) = std::str::from_utf8(&macaroon_bytes) {
+        let content_str = content_str.trim();
+        // Try base64 first
+        if let Ok(decoded) = base64::decode(content_str) {
+            #[cfg(feature = "tracing")]
+            {
+                tracing::debug!("Macaroon detected as base64, converting to hex");
+                tracing::debug!("Decoded base64 macaroon bytes length: {}", decoded.len());
+                tracing::debug!("Decoded base64 macaroon bytes preview: {:?}", &decoded[..std::cmp::min(32, decoded.len())]);
+            }
+            return Ok(hex::encode(&decoded));
+        }
+        // Try hex
+        if let Ok(decoded) = hex::decode(content_str) {
+            #[cfg(feature = "tracing")]
+            {
+                tracing::debug!("Macaroon detected as hex, using as is");
+                tracing::debug!("Decoded hex macaroon bytes length: {}", decoded.len());
+                tracing::debug!("Decoded hex macaroon bytes preview: {:?}", &decoded[..std::cmp::min(32, decoded.len())]);
+            }
+            return Ok(content_str.to_string());
+        }
+        // If not base64 or hex, fall through to treat as binary
+        #[cfg(feature = "tracing")]
+        tracing::debug!("Macaroon is not base64 or hex, treating as binary");
+    } else {
+        #[cfg(feature = "tracing")]
+        tracing::debug!("Macaroon is not valid UTF-8, treating as binary");
+    }
+    // Default: treat as binary macaroon
+    let hex_macaroon = hex::encode(&macaroon_bytes);
+    #[cfg(feature = "tracing")]
+    {
+        tracing::debug!("Final macaroon hex: {}", &hex_macaroon[..std::cmp::min(64, hex_macaroon.len())]);
+        tracing::debug!("Final macaroon bytes length: {}", macaroon_bytes.len());
+        tracing::debug!("Final macaroon bytes preview: {:?}", &macaroon_bytes[..std::cmp::min(32, macaroon_bytes.len())]);
+    }
+    Ok(hex_macaroon)
 }
 
 /// Connects to LND using given address and credentials

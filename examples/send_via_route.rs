@@ -10,8 +10,12 @@ use tonic_lnd::lnrpc::Route;
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -25,7 +29,14 @@ async fn main() {
         // All calls require at least empty parameter
         .send_to_route_v2(tonic_lnd::routerrpc::SendToRouteRequest {
             payment_hash: vec![],
-            route: Some(Route { total_time_lock: 1000, total_fees: 100000, total_amt: 1000000, hops: todo!(), total_fees_msat: 100, total_amt_msat: 1000 }),
+            route: Some(Route {
+                total_time_lock: 1000,
+                total_fees: 100000,
+                total_amt: 1000000,
+                hops: todo!(),
+                total_fees_msat: 100,
+                total_amt_msat: 1000,
+            }),
             skip_temp_err: true,
         })
         .await

@@ -20,8 +20,12 @@ pub fn create_nonce_32() -> [u8; 32] {
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -32,9 +36,7 @@ async fn main() {
 
     let connected_peers: ListPeersResponse = client
         .lightning()
-        .list_peers(tonic_lnd::lnrpc::ListPeersRequest {
-            latest_error: true,
-        })
+        .list_peers(tonic_lnd::lnrpc::ListPeersRequest { latest_error: true })
         .await
         .expect("failed to list peers")
         .into_inner();

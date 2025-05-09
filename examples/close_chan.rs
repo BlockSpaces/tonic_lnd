@@ -4,7 +4,7 @@
 // This program accepts three arguments: address, cert file, macaroon file
 // The address must start with `https://`!
 
-use tonic_lnd::lnrpc::{LightningAddress, ChannelPoint, channel_point::FundingTxid};
+use tonic_lnd::lnrpc::{channel_point::FundingTxid, ChannelPoint, LightningAddress};
 
 use hex::decode;
 use rand::{distributions::Alphanumeric, Rng, RngCore};
@@ -20,8 +20,12 @@ pub fn create_nonce_32() -> [u8; 32] {
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -46,7 +50,9 @@ async fn main() {
 
     let close_chan_req = tonic_lnd::lnrpc::CloseChannelRequest {
         channel_point: Some(ChannelPoint {
-            funding_txid: Some(FundingTxid::FundingTxidStr("aa00a68221803ebd3288cc1607a0df9cb5234600372c963e3d0ddd74221d5564".to_string())),
+            funding_txid: Some(FundingTxid::FundingTxidStr(
+                "aa00a68221803ebd3288cc1607a0df9cb5234600372c963e3d0ddd74221d5564".to_string(),
+            )),
             output_index: 1,
         }),
         force: false,

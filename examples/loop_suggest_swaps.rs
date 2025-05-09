@@ -8,8 +8,12 @@
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -18,11 +22,13 @@ async fn main() {
         .await
         .expect("failed to connect");
 
-    let info = client.loopclient()
+    let info = client
+        .loopclient()
         // All calls require at least empty parameter
         .get_liquidity_params(tonic_lnd::looprpc::GetLiquidityParamsRequest {})
         .await
-        .expect("failed to get info").into_inner();
+        .expect("failed to get info")
+        .into_inner();
 
     // We only print it here, note that in real-life code you may want to call `.into_inner()` on
     // the response to get the message.

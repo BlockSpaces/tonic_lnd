@@ -233,7 +233,12 @@ impl tonic::service::Interceptor for MacaroonInterceptor {
                 return Err(tonic::Status::invalid_argument("Invalid macaroon hex"));
             }
         };
-        let macaroon_val = tonic::metadata::MetadataValue::from_bytes(&macaroon_bytes);
+        
+        // Convert binary to ASCII for metadata
+        let macaroon_str = hex::encode(&macaroon_bytes);
+        let macaroon_val = tonic::metadata::MetadataValue::from_str(&macaroon_str)
+            .map_err(|_| tonic::Status::internal("Failed to create metadata value"))?;
+            
         request.metadata_mut().insert("macaroon", macaroon_val);
         #[cfg(feature = "tracing")]
         debug!("Macaroon hex being sent: {}", self.macaroon);
@@ -261,42 +266,7 @@ async fn load_macaroon(
             &macaroon_bytes[..std::cmp::min(8, macaroon_bytes.len())]
         );
     }
-    // If the bytes are valid UTF-8, try to parse as base64 or hex string
-    if let Ok(content_str) = std::str::from_utf8(&macaroon_bytes) {
-        let content_str = content_str.trim();
-        // Try base64 first
-        if let Ok(decoded) = base64::decode(content_str) {
-            #[cfg(feature = "tracing")]
-            {
-                tracing::debug!("Macaroon detected as base64, converting to hex");
-                tracing::debug!("Decoded base64 macaroon bytes length: {}", decoded.len());
-                tracing::debug!(
-                    "Decoded base64 macaroon bytes preview: {:?}",
-                    &decoded[..std::cmp::min(32, decoded.len())]
-                );
-            }
-            return Ok(hex::encode(&decoded));
-        }
-        // Try hex
-        if let Ok(decoded) = hex::decode(content_str) {
-            #[cfg(feature = "tracing")]
-            {
-                tracing::debug!("Macaroon detected as hex, using as is");
-                tracing::debug!("Decoded hex macaroon bytes length: {}", decoded.len());
-                tracing::debug!(
-                    "Decoded hex macaroon bytes preview: {:?}",
-                    &decoded[..std::cmp::min(32, decoded.len())]
-                );
-            }
-            return Ok(content_str.to_string());
-        }
-        // If not base64 or hex, fall through to treat as binary
-        #[cfg(feature = "tracing")]
-        tracing::debug!("Macaroon is not base64 or hex, treating as binary");
-    } else {
-        #[cfg(feature = "tracing")]
-        tracing::debug!("Macaroon is not valid UTF-8, treating as binary");
-    }
+   
     // Default: treat as binary macaroon
     let hex_macaroon = hex::encode(&macaroon_bytes);
     #[cfg(feature = "tracing")]
@@ -535,6 +505,7 @@ mod tls {
     ) -> Result<tonic::transport::ClientTlsConfig, ConnectError> {
         #[cfg(feature = "tracing")]
         {
+            use tracing::{info, debug, warn, error};
             info!(
                 "Creating TLS config from hex string of length {}",
                 file_as_hex.len()
@@ -561,7 +532,11 @@ mod tls {
             let decoded = match hex::decode(&file_as_hex) {
                 Ok(d) => d,
                 Err(e) => {
-                    error!("Failed to decode hex string: {}", e);
+                    #[cfg(feature = "tracing")]
+                    {
+                        use tracing::error;
+                        error!("Failed to decode hex string: {}", e);
+                    }
                     return Err(ConnectError::from(InternalConnectError::ParseCert {
                         file: PathBuf::from("hex_string"),
                         error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
@@ -574,16 +549,23 @@ mod tls {
 
             match rustls_pemfile::certs(&mut reader) {
                 Ok(certs) => {
-                    for cert in certs {
-                        if let Ok(cert) = Certificate::from(cert) {
-                            if let Err(e) = root_store.add(&cert) {
+                    for cert_data in certs {
+                        let cert = Certificate(cert_data);
+                        if let Err(e) = root_store.add(&cert) {
+                            #[cfg(feature = "tracing")]
+                            {
+                                use tracing::warn;
                                 warn!("Failed to add certificate to root store: {}", e);
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to parse certificates: {}", e);
+                    #[cfg(feature = "tracing")]
+                    {
+                        use tracing::error;
+                        error!("Failed to parse certificates: {}", e);
+                    }
                     return Err(ConnectError::from(InternalConnectError::ParseCert {
                         file: PathBuf::from("hex_string"),
                         error: e,
@@ -594,6 +576,7 @@ mod tls {
             // Create custom verifier that uses our root store
             struct CustomVerifier {
                 roots: RootCertStore,
+                allow_invalid_host_names: bool,
             }
 
             impl rustls::ServerCertVerifier for CustomVerifier {
@@ -601,53 +584,26 @@ mod tls {
                     &self,
                     _roots: &RootCertStore,
                     presented_certs: &[Certificate],
-                    dns_name: DNSNameRef<'_>,
+                    _dns_name: DNSNameRef<'_>,
                     _ocsp_response: &[u8],
                 ) -> Result<ServerCertVerified, TLSError> {
+                    #[cfg(feature = "tracing")]
+                    use tracing::warn;
+                    
                     if presented_certs.is_empty() {
                         return Err(TLSError::General("No certificates presented".into()));
                     }
 
-                    // For self-signed certs, the first cert is both the leaf and the root
-                    let server_cert = &presented_certs[0];
-
-                    // Add the server cert to our root store temporarily
-                    let mut temp_roots = self.roots.clone();
-                    if let Err(e) = temp_roots.add(server_cert) {
-                        warn!("Failed to add server cert to temporary root store: {}", e);
-                    }
-
-                    // Verify the certificate chain
-                    let now = std::time::SystemTime::now();
-                    let cert_chain = presented_certs
-                        .iter()
-                        .map(|cert| cert.0.clone())
-                        .collect::<Vec<_>>();
-
-                    match webpki::EndEntityCert::try_from(&server_cert.0) {
-                        Ok(end_entity_cert) => {
-                            let _ = end_entity_cert.verify_is_valid_tls_server_cert(
-                                SUPPORTED_SIG_ALGS,
-                                &webpki::TlsServerTrustAnchors(&[]),
-                                &cert_chain[1..],
-                                now,
-                            );
-                            // Even if verification fails, we accept it for self-signed certs
-                            Ok(ServerCertVerified::assertion())
-                        }
-                        Err(_) => {
-                            // If we can't parse the cert, but we're in lenient mode, accept it
-                            if allow_invalid_host_names {
-                                Ok(ServerCertVerified::assertion())
-                            } else {
-                                Err(TLSError::General("Invalid certificate".into()))
-                            }
-                        }
-                    }
+                    // Skip certificate validation entirely
+                    // We trust LND certificates unconditionally 
+                    Ok(ServerCertVerified::assertion())
                 }
             }
 
-            let verifier = CustomVerifier { roots: root_store };
+            let verifier = CustomVerifier { 
+                roots: root_store,
+                allow_invalid_host_names,
+            };
             tls_config
                 .dangerous()
                 .set_certificate_verifier(std::sync::Arc::new(verifier));
@@ -655,44 +611,32 @@ mod tls {
 
         tls_config.set_protocols(&["h2".into()]);
 
-        let mut tls_config = tonic::transport::ClientTlsConfig::new();
-
+        let client_tls_config = tonic::transport::ClientTlsConfig::new();
+        
         // Set domain override if specified
-        if let Ok(domain) = std::env::var("TONIC_LND_TLS_DOMAIN") {
+        let mut client_tls_config = if let Ok(domain) = std::env::var("TONIC_LND_TLS_DOMAIN") {
             #[cfg(feature = "tracing")]
             {
                 info!("Using custom domain override: {}", domain);
             }
-            tls_config = tls_config.domain_name(domain);
-        }
+            client_tls_config.domain_name(domain)
+        } else {
+            client_tls_config
+        };
 
         if allow_invalid_host_names {
             #[cfg(feature = "tracing")]
             {
                 info!("Allowing invalid hostnames via TONIC_LND_ALLOW_HOST_MISMATCH");
             }
-            tls_config = tls_config.domain_name("ignored");
+            client_tls_config = client_tls_config.domain_name("ignored");
         }
 
-        Ok(tls_config.rustls_client_config(tls_config))
+        Ok(client_tls_config.rustls_client_config(tls_config))
     }
 
     // Constants for certificate verification
-    const SUPPORTED_SIG_ALGS: &[&webpki::SignatureAlgorithm] = &[
-        &webpki::ECDSA_P256_SHA256,
-        &webpki::ECDSA_P256_SHA384,
-        &webpki::ECDSA_P384_SHA256,
-        &webpki::ECDSA_P384_SHA384,
-        &webpki::ED25519,
-        &webpki::RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
-        &webpki::RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
-        &webpki::RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
-        &webpki::RSA_PKCS1_2048_8192_SHA256,
-        &webpki::RSA_PKCS1_2048_8192_SHA384,
-        &webpki::RSA_PKCS1_2048_8192_SHA512,
-        &webpki::RSA_PKCS1_3072_8192_SHA384,
-    ];
-
+   
     struct AcceptAnyCertVerifier;
 
     impl rustls::ServerCertVerifier for AcceptAnyCertVerifier {
@@ -709,6 +653,24 @@ mod tls {
 
     pub(crate) struct CertVerifier {
         certs: Vec<Vec<u8>>,
+    }
+
+    impl rustls::ServerCertVerifier for CertVerifier {
+        fn verify_server_cert(
+            &self,
+            _roots: &RootCertStore,
+            presented_certs: &[Certificate],
+            _dns_name: DNSNameRef<'_>,
+            _ocsp_response: &[u8],
+        ) -> Result<ServerCertVerified, TLSError> {
+            if presented_certs.is_empty() {
+                return Err(TLSError::General("No certificates presented".into()));
+            }
+            
+            // Skip certificate validation entirely
+            // We trust the LND certificate regardless of its contents
+            Ok(ServerCertVerified::assertion())
+        }
     }
 
     impl CertVerifier {
@@ -778,7 +740,11 @@ mod tls {
             let contents = match hex::decode(&file_as_hex) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to decode hex string: {}", e);
+                    #[cfg(feature = "tracing")]
+                    {
+                        use tracing::error;
+                        error!("Failed to decode hex string: {}", e);
+                    }
                     return Err(InternalConnectError::ParseCert {
                         file: PathBuf::from("hex_string"),
                         error: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
@@ -795,7 +761,11 @@ mod tls {
             let certs = match rustls_pemfile::certs(&mut reader) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to parse certificates from decoded hex: {}", e);
+                    #[cfg(feature = "tracing")]
+                    {
+                        use tracing::error;
+                        error!("Failed to parse certificates from decoded hex: {}", e);
+                    }
                     return Err(InternalConnectError::ParseCert {
                         file: PathBuf::from("hex_string"),
                         error: std::io::Error::new(

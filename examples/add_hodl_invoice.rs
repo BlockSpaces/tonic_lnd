@@ -4,11 +4,15 @@
 // This program accepts three arguments: address, cert file, macaroon file
 // The address must start with `https://`!
 
-use tonic_lnd::{lnrpc::{LightningAddress, payment}, routerrpc::SendPaymentRequest, invoicesrpc::{AddHoldInvoiceRequest, SettleInvoiceMsg, CancelInvoiceMsg}};
+use tonic_lnd::{
+    invoicesrpc::{AddHoldInvoiceRequest, CancelInvoiceMsg, SettleInvoiceMsg},
+    lnrpc::{payment, LightningAddress},
+    routerrpc::SendPaymentRequest,
+};
 
 use hex::decode;
 use rand::{distributions::Alphanumeric, Rng, RngCore};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::{convert::TryInto, thread::sleep, time::Duration};
 
 pub fn create_nonce_32() -> [u8; 32] {
@@ -35,8 +39,12 @@ pub fn hash_256(data: Vec<u8>) -> [u8; 32] {
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -75,11 +83,9 @@ async fn main() {
         .await
         .expect("Expected creation of hodl invoice to succeed");
 
-
     // We only print it here, note that in real-life code you may want to call `.into_inner()` on
     // the response to get the message.
     println!("hodl_invoice {:#?}", hodl_invoice);
-
 
     // self-pay
     let mut payment_attempt = client
@@ -144,7 +150,6 @@ async fn main() {
 
     //     println!("cancel_hodl_invoice {:#?}", cancel_hodl_invoice);
 
-
     // wait for invoice to be marked as ACCEPTED on the receiver end
     // then settle or cancel
     sleep(Duration::from_secs(5));
@@ -154,7 +159,9 @@ async fn main() {
     if should_settle {
         let settle_hodl_invoice = client
             .invoices()
-            .settle_invoice(SettleInvoiceMsg { preimage: secret_random_bytes.to_vec() })
+            .settle_invoice(SettleInvoiceMsg {
+                preimage: secret_random_bytes.to_vec(),
+            })
             .await
             .expect("Expected to settle hodl invoice to succeed");
 
@@ -162,20 +169,12 @@ async fn main() {
     } else {
         let cancel_hodl_invoice = client
             .invoices()
-            .cancel_invoice(CancelInvoiceMsg { payment_hash: hash.to_vec() })
+            .cancel_invoice(CancelInvoiceMsg {
+                payment_hash: hash.to_vec(),
+            })
             .await
             .expect("Expected to cancel hodl invoice to succeed");
 
         println!("cancel_hodl_invoice {:#?}", cancel_hodl_invoice);
     }
 }
-
-
-
-
-
-
-
-
-
-

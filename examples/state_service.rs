@@ -1,5 +1,4 @@
-// This example only fetches and prints the node info to the standard output similarly to
-// `lncli getinfo`.
+// This example unlocks a locked initialized node.
 //
 // This program accepts three arguments: address, cert file, macaroon file
 // The address must start with `https://`!
@@ -22,20 +21,13 @@ async fn main() {
         .await
         .expect("failed to connect");
 
-    let info = client
-        .lightning()
-        // All calls require at least empty parameter
-        .list_payments(tonic_lnd::lnrpc::ListPaymentsRequest {
-            include_incomplete: false,
-            index_offset: 1499002,
-            max_payments: 1,
-            reversed: true,
-            count_total_payments: false,
-        })
+    let unlock = client
+        .state()
+        .get_state(tonic_lnd::lnrpc::GetStateRequest {})
         .await
-        .expect("failed to get wallet balance");
+        .expect("failed to get info");
 
     // We only print it here, note that in real-life code you may want to call `.into_inner()` on
     // the response to get the message.
-    println!("{:#?}", info);
+    println!("{:#?}", unlock);
 }

@@ -4,15 +4,19 @@
 // This program accepts three arguments: address, cert file, macaroon file
 // The address must start with `https://`!
 
-use tonic_lnd::lnrpc::{ChannelPoint, channel_point::FundingTxid};
+use tonic_lnd::lnrpc::{channel_point::FundingTxid, ChannelPoint};
 
 #[tokio::main]
 #[allow(deprecated)]
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
@@ -32,10 +36,11 @@ async fn main() {
             peer: vec![],
         })
         .await
-        .expect("failed to get all channels").into_inner();
+        .expect("failed to get all channels")
+        .into_inner();
 
     for channel in channels.channels {
-        if let Some((funding_txid, output_index)) = channel.channel_point.split_once(':'){
+        if let Some((funding_txid, output_index)) = channel.channel_point.split_once(':') {
             let close_chan_req = tonic_lnd::lnrpc::CloseChannelRequest {
                 channel_point: Some(ChannelPoint {
                     funding_txid: Some(FundingTxid::FundingTxidStr(funding_txid.to_string())),
@@ -47,10 +52,9 @@ async fn main() {
                 max_fee_per_vbyte: 10,
                 delivery_address: "".to_string(),
             };
-        
-    
-        // let close_chan_req = tonic_lnd::lnrpc::CloseChannelRequest;
-    
+
+            // let close_chan_req = tonic_lnd::lnrpc::CloseChannelRequest;
+
             client
                 .lightning()
                 .close_channel(close_chan_req)
@@ -60,16 +64,16 @@ async fn main() {
     }
 
     let address = client
-    .wallet()
-    // All calls require at least empty parameter
-    .next_addr(tonic_lnd::walletrpc::AddrRequest {
-        account: "".to_string(),
-        r#type: 1,
-        change: false,
-    })
-    .await
-    .expect("failed to get next address")
-    .into_inner();
+        .wallet()
+        // All calls require at least empty parameter
+        .next_addr(tonic_lnd::walletrpc::AddrRequest {
+            account: "".to_string(),
+            r#type: 1,
+            change: false,
+        })
+        .await
+        .expect("failed to get next address")
+        .into_inner();
 
     let info = client
         .lightning()
@@ -87,7 +91,6 @@ async fn main() {
         })
         .await
         .expect("failed to send all utxos");
-        
 
     // We only print it here, note that in real-life code you may want to call `.into_inner()` on
     // the response to get the message.

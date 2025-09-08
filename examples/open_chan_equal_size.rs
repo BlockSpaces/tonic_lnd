@@ -4,9 +4,13 @@
 // This program accepts three arguments: address, cert file, macaroon file
 // The address must start with `https://`!
 
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 use rust_decimal_macros::dec;
-use tonic_lnd::{lnrpc::{LightningAddress, WalletBalanceResponse, BatchOpenChannelResponse}, Client, walletrpc::{AddrResponse, ListUnspentResponse}};
+use tonic_lnd::{
+    lnrpc::{BatchOpenChannelResponse, LightningAddress, WalletBalanceResponse},
+    walletrpc::{AddrResponse, ListUnspentResponse},
+    Client,
+};
 
 use hex::decode;
 use rand::{distributions::Alphanumeric, Rng, RngCore};
@@ -98,7 +102,6 @@ pub async fn batch_open_channels_equal_size(
         .await
         .expect("failed to open channel(s) or receive txid(s)")
         .into_inner()
-
 }
 
 pub async fn get_onchain_balance(client: &mut Client) -> WalletBalanceResponse {
@@ -154,8 +157,12 @@ pub async fn list_unspent_utxos(
 async fn main() {
     let mut args = std::env::args_os();
     args.next().expect("not even zeroth arg given");
-    let address = args.next().expect("missing arguments: address, cert file, macaroon file");
-    let cert_file = args.next().expect("missing arguments: cert file, macaroon file");
+    let address = args
+        .next()
+        .expect("missing arguments: address, cert file, macaroon file");
+    let cert_file = args
+        .next()
+        .expect("missing arguments: cert file, macaroon file");
     let macaroon_file = args.next().expect("missing argument: macaroon file");
     let address = address.into_string().expect("address is not UTF-8");
 
